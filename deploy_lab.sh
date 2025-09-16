@@ -2,8 +2,8 @@
 # deploy_lab.sh
 # Script d'installation et de déploiement du lab Purple Team sur Debian 12
 
-set -e  # exit on error
-set -u  # exit on unset variables
+set -e
+set -u
 
 echo "=== Vérification des privilèges sudo ==="
 if [ "$EUID" -ne 0 ]; then
@@ -11,55 +11,68 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-echo "=== Suppression d'anciennes installations Docker ==="
-for pkg in docker.io docker-doc docker-compose podman-docker containerd runc; do
-    apt-get remove -y $pkg || true
-done
-
-echo "=== Installation des prérequis ==="
-apt-get update
-apt-get install -y ca-certificates curl gnupg lsb-release
-
-echo "=== Ajout de la clé GPG officielle Docker ==="
-install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
-chmod a+r /etc/apt/keyrings/docker.asc
-
-echo "=== Ajout du dépôt Docker ==="
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
-  | tee /etc/apt/sources.list.d/docker.list > /dev/null
-
-apt-get update
-apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-
-echo "=== Vérification Docker ==="
-docker --version
-docker compose version
+echo "=== Vérification et installation Docker ==="
+if ! command -v docker &>/dev/null; then
+    echo "Docker non trouvé, installation..."
+    for pkg in docker.io docker-doc docker-compose podman-docker containerd runc; do
+        apt-get remove -y $pkg || true
+    done
+    apt-get update
+    apt-get install -y ca-certificates curl gnupg lsb-release
+    install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+    chmod a+r /etc/apt/keyrings/docker.asc
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+    apt-get update
+    apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+else
+    echo "Docker est déjà installé, on skip cette étape."
+fi
 
 # Crée un répertoire pour les volumes persistants
 mkdir -p ~/lab-volumes/{debian12,ubuntu,windows,netdata}
 
+# Fonction de déploiement qui skip si le conteneur existe
+deploy_container() {
+    local name=$1
+    shift
+    if [ "$(docker ps -a -q -f name=^/${name}$)" ]; then
+        echo "Conteneur $name existe déjà, skip."
+    else
+        echo "Démarrage du conteneur $name..."
+        docker run "$@"
+    fi
+}
+
 # === Déploiement Wazuh ===
-echo "=== Déploiement Wazuh ==="
-cd ~
-git clone https://github.com/wazuh/wazuh-docker.git -b v4.12.0
-cd wazuh-docker/single-node/
-docker compose -f generate-indexer-certs.yml run --rm generator
-docker compose up -d
-cd ~  # Retour au home
+if [ ! -d ~/wazuh-docker ]; then
+    echo "=== Déploiement Wazuh ==="
+    cd ~
+    git clone https://github.com/wazuh/wazuh-docker.git -b v4.12.0
+    cd wazuh-docker/single-node/
+    docker compose -f generate-indexer-certs.yml run --rm generator
+    docker compose up -d
+    cd ~
+else
+    echo "Wazuh déjà déployé, skip."
+fi
 
 # === Déploiement Caldera ===
-echo "=== Déploiement Caldera ==="
-git clone https://github.com/mitre/caldera.git --recursive --branch 5.3.0
-cd caldera
-docker build --build-arg WIN_BUILD=true -t caldera:server .
-docker compose build
-docker run -d -p 7010:7010 -p 7011:7011/udp -p 7012:7012 -p 8888:8888 caldera:server
-cd ~
+if [ ! -d ~/caldera ]; then
+    echo "=== Déploiement Caldera ==="
+    cd ~
+    git clone https://github.com/mitre/caldera.git --recursive --branch 5.3.0
+    cd caldera
+    docker build --build-arg WIN_BUILD=true -t caldera:server .
+    docker compose build
+    docker run -d -p 7010:7010 -p 7011:7011/udp -p 7012:7012 -p 8888:8888 caldera:server
+    cd ~
+else
+    echo "Caldera déjà déployé, skip."
+fi
 
 # === Déploiement Netdata ===
-echo "=== Déploiement Netdata ==="
-docker run -d --name=netdata \
+deploy_container netdata -d --name=netdata \
   --pid=host \
   --network=host \
   -v netdataconfig:/etc/netdata \
@@ -82,9 +95,7 @@ docker run -d --name=netdata \
   netdata/netdata
 
 # === Déploiement Windows Server 2022 ===
-echo "=== Déploiement Windows Server 2022 ==="
-mkdir -p ~/lab-volumes/windows
-docker run -d \
+deploy_container windows -d \
   --name windows \
   --restart always \
   --stop-timeout 120 \
@@ -99,9 +110,7 @@ docker run -d \
   dockurr/windows
 
 # === Déploiement Debian 12 ===
-echo "=== Déploiement Debian 12 ==="
-mkdir -p ~/lab-volumes/debian12
-docker run -d \
+deploy_container debian12 -d \
   --name debian12 \
   --hostname debian12 \
   --restart always \
@@ -111,9 +120,7 @@ docker run -d \
   debian:12 sleep infinity
 
 # === Déploiement Ubuntu ===
-echo "=== Déploiement Ubuntu ==="
-mkdir -p ~/lab-volumes/ubuntu
-docker run -d \
+deploy_container ubuntu -d \
   --name ubuntu \
   --hostname ubuntu \
   --restart always \
@@ -123,4 +130,4 @@ docker run -d \
   ubuntu:latest sleep infinity
 
 echo "=== Déploiement terminé ==="
-echo "Vérifiez vos conteneurs avec : docker ps"
+docker ps
