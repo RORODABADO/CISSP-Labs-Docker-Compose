@@ -117,7 +117,7 @@ deploy_container debian12 -d \
   -it \
   -p 2222:22 \
   -v ~/lab-volumes/debian12:/root \
-  debian:12 sleep infinity
+  debian:bookworm sleep infinity
 
 # === Déploiement Ubuntu ===
 deploy_container ubuntu -d \
@@ -131,3 +131,4 @@ deploy_container ubuntu -d \
 
 echo "=== Déploiement terminé ==="
 docker ps
+
